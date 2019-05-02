@@ -152,7 +152,9 @@ class ForeachDataWriter[T](
     ForeachWriterCommitMessage
   }
 
-  override def abort(): Unit = {}
+  override def abort(): Unit = {
+    writer.close(new RuntimeException("Foreach writer aborted"))
+  }
 }
 
 /**
