@@ -38,6 +38,7 @@ class ConsoleWriteSupportSuite extends StreamTest {
         query.processAllAvailable()
         input.addData()
         query.processAllAvailable()
+        assert(query.lastProgress.sink.description.contains("ConsoleTable"))
       } finally {
         query.stop()
       }

@@ -63,7 +63,7 @@ class ConsoleSinkProvider extends TableProvider
 
 object ConsoleTable extends Table with SupportsWrite {
 
-  override def name(): String = "console"
+  override def name(): String = "ConsoleTable"
 
   override def schema(): StructType = StructType(Nil)
 
@@ -89,4 +89,6 @@ object ConsoleTable extends Table with SupportsWrite {
       }
     }
   }
+
+  override def toString(): String = "ConsoleTable"
 }
