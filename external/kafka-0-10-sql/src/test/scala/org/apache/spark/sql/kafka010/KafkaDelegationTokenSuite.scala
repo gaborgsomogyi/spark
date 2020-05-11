@@ -39,80 +39,85 @@ class KafkaDelegationTokenSuite extends StreamTest with SharedSparkSession with 
   protected override def sparkConf = super.sparkConf
     .set("spark.security.credentials.hadoopfs.enabled", "false")
     .set("spark.security.credentials.hbase.enabled", "false")
-    .set(KEYTAB, testUtils.clientKeytab)
-    .set(PRINCIPAL, testUtils.clientPrincipal)
-    .set("spark.kafka.clusters.cluster1.auth.bootstrap.servers", testUtils.brokerAddress)
-    .set("spark.kafka.clusters.cluster1.security.protocol", SASL_PLAINTEXT.name)
 
-  override def beforeAll(): Unit = {
-    testUtils = new KafkaTestUtils(Map.empty, true)
-    testUtils.setup()
-    super.beforeAll()
-  }
-
-  override def afterAll(): Unit = {
+  testRetry("Roundtrip", 3) {
     try {
+      testUtils = new KafkaTestUtils(Map.empty, true)
+      testUtils.setup()
+
+      if (KafkaDelegationTokenSuite.cnt == 0) {
+        KafkaDelegationTokenSuite.cnt += 1
+        throw new IllegalArgumentException("Planned exception for testing only")
+      }
+
+      spark.sparkContext.conf.set(KEYTAB.key, testUtils.clientKeytab)
+      spark.sparkContext.conf.set(PRINCIPAL.key, testUtils.clientPrincipal)
+      spark.sparkContext.conf.set("spark.kafka.clusters.cluster1.auth.bootstrap.servers",
+        testUtils.brokerAddress)
+      spark.sparkContext.conf.set("spark.kafka.clusters.cluster1.security.protocol",
+        SASL_PLAINTEXT.name)
+
+      val hadoopConf = new Configuration()
+      val manager = new HadoopDelegationTokenManager(spark.sparkContext.conf, hadoopConf, null)
+      val credentials = new Credentials()
+      manager.obtainDelegationTokens(credentials)
+      val serializedCredentials = SparkHadoopUtil.get.serialize(credentials)
+      SparkHadoopUtil.get.addDelegationTokens(serializedCredentials, spark.sparkContext.conf)
+
+      val topic = "topic-" + UUID.randomUUID().toString
+      testUtils.createTopic(topic, partitions = 5)
+
+      withTempDir { checkpointDir =>
+        val input = MemoryStream[String]
+
+        val df = input.toDF()
+        val writer = df.writeStream
+          .outputMode(OutputMode.Append)
+          .format("kafka")
+          .option("checkpointLocation", checkpointDir.getCanonicalPath)
+          .option("kafka.bootstrap.servers", testUtils.brokerAddress)
+          .option("topic", topic)
+          .start()
+
+        try {
+          input.addData("1", "2", "3", "4", "5")
+          failAfter(streamingTimeout) {
+            writer.processAllAvailable()
+          }
+        } finally {
+          writer.stop()
+        }
+      }
+
+      val streamingDf = spark.readStream
+        .format("kafka")
+        .option("kafka.bootstrap.servers", testUtils.brokerAddress)
+        .option("startingOffsets", s"earliest")
+        .option("subscribe", topic)
+        .load()
+        .selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)")
+        .as[(String, String)]
+        .map(kv => kv._2.toInt + 1)
+
+      testStream(streamingDf)(
+        StartStream(),
+        AssertOnQuery { q =>
+          q.processAllAvailable()
+          true
+        },
+        CheckAnswer(2, 3, 4, 5, 6),
+        StopStream
+      )
+    } finally {
       if (testUtils != null) {
         testUtils.teardown()
         testUtils = null
       }
       UserGroupInformation.reset()
-    } finally {
-      super.afterAll()
     }
   }
+}
 
-  testRetry("Roundtrip", 3) {
-    val hadoopConf = new Configuration()
-    val manager = new HadoopDelegationTokenManager(spark.sparkContext.conf, hadoopConf, null)
-    val credentials = new Credentials()
-    manager.obtainDelegationTokens(credentials)
-    val serializedCredentials = SparkHadoopUtil.get.serialize(credentials)
-    SparkHadoopUtil.get.addDelegationTokens(serializedCredentials, spark.sparkContext.conf)
-
-    val topic = "topic-" + UUID.randomUUID().toString
-    testUtils.createTopic(topic, partitions = 5)
-
-    withTempDir { checkpointDir =>
-      val input = MemoryStream[String]
-
-      val df = input.toDF()
-      val writer = df.writeStream
-        .outputMode(OutputMode.Append)
-        .format("kafka")
-        .option("checkpointLocation", checkpointDir.getCanonicalPath)
-        .option("kafka.bootstrap.servers", testUtils.brokerAddress)
-        .option("topic", topic)
-        .start()
-
-      try {
-        input.addData("1", "2", "3", "4", "5")
-        failAfter(streamingTimeout) {
-          writer.processAllAvailable()
-        }
-      } finally {
-        writer.stop()
-      }
-    }
-
-    val streamingDf = spark.readStream
-      .format("kafka")
-      .option("kafka.bootstrap.servers", testUtils.brokerAddress)
-      .option("startingOffsets", s"earliest")
-      .option("subscribe", topic)
-      .load()
-      .selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)")
-      .as[(String, String)]
-      .map(kv => kv._2.toInt + 1)
-
-    testStream(streamingDf)(
-      StartStream(),
-      AssertOnQuery { q =>
-        q.processAllAvailable()
-        true
-      },
-      CheckAnswer(2, 3, 4, 5, 6),
-      StopStream
-    )
-  }
+object KafkaDelegationTokenSuite {
+  var cnt = 0
 }
