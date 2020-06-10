@@ -1649,8 +1649,13 @@ abstract class KafkaSourceSuiteBase extends KafkaSourceTest {
       .load()
 
     val query = kafka
-      .writeStream
-      .format("memory")
+      .writeStream.foreach(new ForeachWriter[Row] {
+        override def open(partitionId: Long, version: Long): Boolean = true
+        override def process(row: Row): Unit = {
+          System.out.println("aaaaaaaaaaaa: " + row.get(7).toString)
+        }
+        override def close(errorOrNull: Throwable): Unit = {}
+      })
       .queryName("kafkaColumnTypes")
       .trigger(defaultTrigger)
       .start()
