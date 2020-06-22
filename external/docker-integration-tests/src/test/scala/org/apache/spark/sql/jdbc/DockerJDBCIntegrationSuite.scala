@@ -96,7 +96,7 @@ abstract class DockerJDBCIntegrationSuite extends SharedSparkSession with Eventu
 
   protected val dockerIp = DockerUtils.getDockerIp()
   val db: DatabaseOnDocker
-  val connectionTimeout: Timeout = timeout(1.minute)
+  val connectionTimeout: Timeout = timeout(2.minute)
 
   private var docker: DockerClient = _
   protected var externalPort: Int = _
