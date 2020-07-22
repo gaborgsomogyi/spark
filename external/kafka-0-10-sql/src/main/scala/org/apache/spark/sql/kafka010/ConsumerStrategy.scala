@@ -20,12 +20,14 @@ package org.apache.spark.sql.kafka010
 import java.{util => ju}
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 
+import org.apache.kafka.clients.admin.Admin
 import org.apache.kafka.clients.consumer.{Consumer, KafkaConsumer}
-import org.apache.kafka.clients.consumer.internals.NoOpConsumerRebalanceListener
 import org.apache.kafka.common.TopicPartition
 
-import org.apache.spark.kafka010.KafkaConfigUpdater
+import org.apache.spark.internal.Logging
+import org.apache.spark.kafka010.{KafkaConfigUpdater, KafkaRedactionUtil}
 
 /**
  * Subscribe allows you to subscribe to a fixed collection of topics.
@@ -36,9 +38,22 @@ import org.apache.spark.kafka010.KafkaConfigUpdater
  * All three strategies have overloaded constructors that allow you to specify
  * the starting offset for a particular partition.
  */
-private[kafka010] sealed trait ConsumerStrategy {
-  /** Create a [[KafkaConsumer]] and subscribe to topics according to a desired strategy */
-  def createConsumer(kafkaParams: ju.Map[String, Object]): Consumer[Array[Byte], Array[Byte]]
+private[kafka010] sealed trait ConsumerStrategy extends Logging {
+  /** Creates a [[KafkaConsumer]] */
+  def createConsumer(
+      kafkaParams: ju.Map[String, Object]): Consumer[Array[Byte], Array[Byte]] = {
+    val updatedKafkaParams = setAuthenticationConfigIfNeeded(kafkaParams)
+    logDebug(s"Consumer params: " +
+      s"${KafkaRedactionUtil.redactParams(updatedKafkaParams.asScala.toSeq)}")
+    new KafkaConsumer[Array[Byte], Array[Byte]](updatedKafkaParams)
+  }
+
+  /** Creates an [[org.apache.kafka.clients.admin.AdminClient]] */
+  def createAdmin(kafkaParams: ju.Map[String, Object]): Admin = {
+    val updatedKafkaParams = setAuthenticationConfigIfNeeded(kafkaParams)
+    logDebug(s"Admin params: ${KafkaRedactionUtil.redactParams(updatedKafkaParams.asScala.toSeq)}")
+    Admin.create(updatedKafkaParams)
+  }
 
   /**
    * Updates the parameters with security if needed.
@@ -48,19 +63,27 @@ private[kafka010] sealed trait ConsumerStrategy {
     KafkaConfigUpdater("source", kafkaParams.asScala.toMap)
       .setAuthenticationConfigIfNeeded()
       .build()
+
+  /** Returns the assigned or subscribed [[TopicPartition]] */
+  def assignedTopicPartitions(consumer: Consumer[Array[Byte], Array[Byte]]): Set[TopicPartition]
 }
 
 /**
  * Specify a fixed collection of partitions.
  */
 private[kafka010] case class AssignStrategy(partitions: Array[TopicPartition])
-    extends ConsumerStrategy {
-  override def createConsumer(
-      kafkaParams: ju.Map[String, Object]): Consumer[Array[Byte], Array[Byte]] = {
-    val updatedKafkaParams = setAuthenticationConfigIfNeeded(kafkaParams)
-    val consumer = new KafkaConsumer[Array[Byte], Array[Byte]](updatedKafkaParams)
-    consumer.assign(ju.Arrays.asList(partitions: _*))
-    consumer
+    extends ConsumerStrategy with Logging {
+  override def assignedTopicPartitions(
+      consumer: Consumer[Array[Byte], Array[Byte]]): Set[TopicPartition] = {
+    val topics = partitions.map(_.topic()).toSet
+    logDebug(s"Topics for assignment: $topics")
+    topics.flatMap { topic =>
+      consumer.partitionsFor(topic).asScala.map { partitionInfo =>
+        val partition = partitionInfo.partition()
+        logDebug(s"Partition added: $topic-$partition")
+        new TopicPartition(topic, partition)
+      }
+    }.filter(partitions.contains(_))
   }
 
   override def toString: String = s"Assign[${partitions.mkString(", ")}]"
@@ -69,13 +92,17 @@ private[kafka010] case class AssignStrategy(partitions: Array[TopicPartition])
 /**
  * Subscribe to a fixed collection of topics.
  */
-private[kafka010] case class SubscribeStrategy(topics: Seq[String]) extends ConsumerStrategy {
-  override def createConsumer(
-      kafkaParams: ju.Map[String, Object]): Consumer[Array[Byte], Array[Byte]] = {
-    val updatedKafkaParams = setAuthenticationConfigIfNeeded(kafkaParams)
-    val consumer = new KafkaConsumer[Array[Byte], Array[Byte]](updatedKafkaParams)
-    consumer.subscribe(topics.asJava)
-    consumer
+private[kafka010] case class SubscribeStrategy(topics: Seq[String])
+    extends ConsumerStrategy with Logging {
+  override def assignedTopicPartitions(
+      consumer: Consumer[Array[Byte], Array[Byte]]): Set[TopicPartition] = {
+    topics.toSet.flatMap { topic: String =>
+      consumer.partitionsFor(topic).asScala.map { partitionInfo =>
+        val partition = partitionInfo.partition()
+        logDebug(s"Partition added: $topic-$partition")
+        new TopicPartition(topic, partition)
+      }
+    }
   }
 
   override def toString: String = s"Subscribe[${topics.mkString(", ")}]"
@@ -85,15 +112,25 @@ private[kafka010] case class SubscribeStrategy(topics: Seq[String]) extends Cons
  * Use a regex to specify topics of interest.
  */
 private[kafka010] case class SubscribePatternStrategy(topicPattern: String)
-    extends ConsumerStrategy {
-  override def createConsumer(
-      kafkaParams: ju.Map[String, Object]): Consumer[Array[Byte], Array[Byte]] = {
-    val updatedKafkaParams = setAuthenticationConfigIfNeeded(kafkaParams)
-    val consumer = new KafkaConsumer[Array[Byte], Array[Byte]](updatedKafkaParams)
-    consumer.subscribe(
-      ju.regex.Pattern.compile(topicPattern),
-      new NoOpConsumerRebalanceListener())
-    consumer
+    extends ConsumerStrategy with Logging {
+  private val topicRegex = topicPattern.r
+
+  override def assignedTopicPartitions(
+      consumer: Consumer[Array[Byte], Array[Byte]]): Set[TopicPartition] = {
+    var topics = mutable.Seq.empty[String]
+    consumer.listTopics().keySet().forEach { topic =>
+      if (topicRegex.findFirstIn(topic).isDefined) {
+        logDebug(s"Topic matches pattern: $topic")
+        topics :+= topic
+      }
+    }
+    topics.toSet.flatMap { topic: String =>
+      consumer.partitionsFor(topic).asScala.map { partitionInfo =>
+        val partition = partitionInfo.partition()
+        logDebug(s"Partition added: $topic-$partition")
+        new TopicPartition(topic, partition)
+      }
+    }
   }
 
   override def toString: String = s"SubscribePattern[$topicPattern]"

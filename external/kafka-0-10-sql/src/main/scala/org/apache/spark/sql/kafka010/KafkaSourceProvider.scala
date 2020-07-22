@@ -96,8 +96,7 @@ private[kafka010] class KafkaSourceProvider extends DataSourceRegister
     val kafkaOffsetReader = new KafkaOffsetReader(
       strategy(caseInsensitiveParameters),
       kafkaParamsForDriver(specifiedKafkaParams),
-      caseInsensitiveParameters,
-      driverGroupIdPrefix = s"$uniqueGroupId-driver")
+      caseInsensitiveParameters)
 
     new KafkaSource(
       sqlContext,
@@ -464,8 +463,7 @@ private[kafka010] class KafkaSourceProvider extends DataSourceRegister
       val kafkaOffsetReader = new KafkaOffsetReader(
         strategy(caseInsensitiveOptions),
         kafkaParamsForDriver(specifiedKafkaParams),
-        caseInsensitiveOptions,
-        driverGroupIdPrefix = s"$uniqueGroupId-driver")
+        caseInsensitiveOptions)
 
       new KafkaMicroBatchStream(
         kafkaOffsetReader,
@@ -493,8 +491,7 @@ private[kafka010] class KafkaSourceProvider extends DataSourceRegister
       val kafkaOffsetReader = new KafkaOffsetReader(
         strategy(caseInsensitiveOptions),
         kafkaParamsForDriver(specifiedKafkaParams),
-        caseInsensitiveOptions,
-        driverGroupIdPrefix = s"$uniqueGroupId-driver")
+        caseInsensitiveOptions)
 
       new KafkaContinuousStream(
         kafkaOffsetReader,
